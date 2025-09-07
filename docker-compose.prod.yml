@@ -1,0 +1,132 @@
+# Docker Compose pour production avec images pré-buildées
+version: '3.8'
+
+services:
+  musicspree:
+    image: ghcr.io/votre-username/musicspree:latest
+    # ou image: votre-username/musicspree:latest (Docker Hub)
+    container_name: musicspree
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - downloads:/downloads
+      - music:/music
+    depends_on:
+      - navidrome
+      - slskd
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "node", "/app/dist/cli.js", "test"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      - ND_SCANSCHEDULE=1h
+      - ND_LOGLEVEL=info  
+      - ND_SESSIONTIMEOUT=24h
+      - ND_BASEURL=""
+      - ND_ENABLETRANSCODINGCONFIG=true
+    volumes:
+      - navidrome-data:/data
+      - music:/music:ro
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4533/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    ports:
+      - "5030:5030"
+      - "50300:50300"
+    environment:
+      - SLSKD_REMOTE_CONFIGURATION=true
+      - SLSKD_NO_HTTPS=false
+    env_file:
+      - .env
+    volumes:
+      - slskd-data:/app
+      - downloads:/downloads
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5030/api/v0/session"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  beets:
+    image: lscr.io/linuxserver/beets:latest
+    container_name: beets
+    restart: unless-stopped
+    ports:
+      - "8337:8337"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+    volumes:
+      - beets-config:/config
+      - downloads:/downloads
+      - music:/music
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8337/stats"] 
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # Optionnel: Service de monitoring
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=3600
+      - WATCHTOWER_INCLUDE_STOPPED=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - musicspree-network
+    profiles:
+      - monitoring
+
+networks:
+  musicspree-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  downloads:
+    driver: local
+  music:
+    driver: local
+  navidrome-data:
+    driver: local
+  slskd-data:
+    driver: local
+  beets-config:
+    driver: local
