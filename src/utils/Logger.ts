@@ -1,45 +1,76 @@
 import winston from "winston";
-import { Config } from "../config/Config";
+import path from "path";
 
 export class Logger {
   private static instance: winston.Logger;
 
   public static getInstance(): winston.Logger {
     if (!Logger.instance) {
-      const config = Config.getInstance();
+      Logger.instance = Logger.createLogger();
+    }
+    return Logger.instance;
+  }
 
-      const transports: winston.transport[] = [
-        new winston.transports.Console({
-          format: winston.format.combine(
-            winston.format.colorize(),
-            winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
-            winston.format.printf(({ timestamp, level, message, ...rest }) => {
-              const restStr =
-                Object.keys(rest).length > 0 ? ` ${JSON.stringify(rest)}` : "";
-              return `${timestamp} [${level}]: ${message}${restStr}`;
-            })
-          ),
-        }),
-      ];
+  private static createLogger(): winston.Logger {
+    // Get log level from environment, default to 'info'
+    const logLevel = process.env.LOG_LEVEL?.toLowerCase() || "info";
+    const logToFile = process.env.LOG_TO_FILE !== "false";
 
-      if (config.logToFile) {
-        transports.push(
-          new winston.transports.File({
-            filename: "/app/data/musicspree.log",
-            format: winston.format.combine(
-              winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
-              winston.format.json()
-            ),
+    const transports: winston.transport[] = [
+      new winston.transports.Console({
+        format: winston.format.combine(
+          winston.format.colorize({ all: true }),
+          winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+          winston.format.printf(({ timestamp, level, message, ...meta }) => {
+            let metaStr = "";
+            if (Object.keys(meta).length > 0) {
+              metaStr = " " + JSON.stringify(meta, null, 2);
+            }
+            return `${timestamp} [${level}]: ${message}${metaStr}`;
           })
-        );
-      }
+        ),
+      }),
+    ];
 
-      Logger.instance = winston.createLogger({
-        level: config.logLevel,
-        transports,
-      });
+    // Add file transport if enabled
+    if (logToFile) {
+      const logDir =
+        process.env.NODE_ENV === "production" ? "/app/data" : "./data";
+      const logFile = path.join(logDir, "musicspree.log");
+
+      transports.push(
+        new winston.transports.File({
+          filename: logFile,
+          format: winston.format.combine(
+            winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+            winston.format.json()
+          ),
+          maxsize: 50 * 1024 * 1024, // 50MB
+          maxFiles: 5,
+        })
+      );
     }
 
-    return Logger.instance;
+    return winston.createLogger({
+      level: logLevel,
+      transports,
+      handleExceptions: true,
+      handleRejections: true,
+      exitOnError: false,
+    });
+  }
+
+  // Utility method to reconfigure logger if needed
+  public static reconfigure(options: {
+    level?: string;
+    logToFile?: boolean;
+  }): void {
+    if (Logger.instance) {
+      if (options.level) {
+        Logger.instance.level = options.level;
+      }
+      // For more complex reconfigurations, recreate the instance
+      Logger.instance = Logger.createLogger();
+    }
   }
 }

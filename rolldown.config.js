@@ -8,14 +8,19 @@ export default defineConfig({
         sourcemap: true
     },
     external: [
+        // Node.js built-in modules
+        'crypto',
+        'util',
+        'fs',
+        'path',
+        'child_process',
+
+        // NPM dependencies
         'node-cron',
         'axios',
         'dotenv',
         'winston',
-        'commander',
-        'fs',
-        'path',
-        'child_process'
+        'commander'
     ],
     resolve: {
         extensions: ['.ts', '.js']

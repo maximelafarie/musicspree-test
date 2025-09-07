@@ -1,5 +1,3 @@
-import { Logger } from "../utils/Logger";
-
 export class Config {
   private static instance: Config;
 
@@ -110,7 +108,11 @@ export class Config {
     // Other
     this.dryRun = this.getBooleanEnvVar("DRY_RUN", false);
 
-    this.logConfiguration();
+    // Log configuration only in debug mode and only after logger is ready
+    if (this.logLevel === "debug") {
+      // Use setTimeout to avoid circular dependency during initialization
+      setTimeout(() => this.logConfiguration(), 0);
+    }
   }
 
   public static getInstance(): Config {
@@ -249,9 +251,11 @@ export class Config {
   }
 
   private logConfiguration(): void {
-    // Only log in debug mode to avoid cluttering logs
-    if (process.env.LOG_LEVEL === "debug") {
+    // Import Logger here to avoid circular dependency
+    try {
+      const { Logger } = require("../utils/Logger");
       const logger = Logger.getInstance();
+
       logger.debug("Configuration loaded:", {
         lastfm: {
           username: this.lastfmUsername,
@@ -282,6 +286,9 @@ export class Config {
         schedule: this.cronSchedule,
         dryRun: this.dryRun,
       });
+    } catch (error) {
+      // Ignore logging errors during initialization
+      console.debug("Could not log configuration:", error);
     }
   }
 
