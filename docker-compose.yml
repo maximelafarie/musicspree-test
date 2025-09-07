@@ -1,0 +1,230 @@
+version: '3.8'
+
+services:
+  musicspree:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: musicspree
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - RUN_ON_STARTUP=true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src  # For development hot-reload
+      - downloads:/downloads
+      - music:/music
+    depends_on:
+      - navidrome
+      - slskd
+      - beets
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "spree", "test"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    ports:
+      - "3000:3000"  # For future web interface
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      - ND_SCANSCHEDULE=15m
+      - ND_LOGLEVEL=info  
+      - ND_SESSIONTIMEOUT=24h
+      - ND_BASEURL=""
+      - ND_ENABLETRANSCODINGCONFIG=true
+      - ND_MUSICFOLDER=/music
+      - ND_DATAFOLDER=/data
+      - ND_CACHEFOLDER=/data/cache
+      - ND_ENABLESHARING=false
+      - ND_ENABLEEXTERNALSERVICES=false
+    volumes:
+      - navidrome-data:/data
+      - music:/music:ro
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4533/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    ports:
+      - "5030:5030"   # Web interface
+      - "50300:50300" # Soulseek listening port
+    environment:
+      - SLSKD_REMOTE_CONFIGURATION=true
+      - SLSKD_NO_HTTPS=false
+      - SLSKD_HTTP_PORT=5030
+      - SLSKD_HTTPS_DISABLED=true
+    env_file:
+      - .env
+    volumes:
+      - slskd-data:/app
+      - slskd-config:/app/config
+      - downloads:/downloads
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5030/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  beets:
+    image: lscr.io/linuxserver/beets:latest
+    container_name: beets
+    restart: unless-stopped
+    ports:
+      - "8337:8337"
+    environment:
+      - PUID=1001
+      - PGID=1001
+      - TZ=UTC
+    volumes:
+      - beets-config:/config
+      - downloads:/downloads
+      - music:/music
+    networks:
+      - musicspree-network
+    healthcheck:
+      test: ["CMD", "beet", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # Configuration overlay for beets
+    configs:
+      - source: beets_config
+        target: /config/config.yaml
+        mode: 0644
+
+  # Optional: Database for advanced features
+  redis:
+    image: redis:7-alpine
+    container_name: musicspree-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - musicspree-network
+    profiles:
+      - with-redis
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+  # Optional: Monitoring with Prometheus metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: musicspree-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus-config:/etc/prometheus
+      - prometheus-data:/prometheus
+    networks:
+      - musicspree-network
+    profiles:
+      - monitoring
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+networks:
+  musicspree-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  downloads:
+    driver: local
+  music:
+    driver: local
+  navidrome-data:
+    driver: local
+  slskd-data:
+    driver: local
+  slskd-config:
+    driver: local
+  beets-config:
+    driver: local
+  redis-data:
+    driver: local
+    profiles: ["with-redis"]
+  prometheus-data:
+    driver: local
+    profiles: ["monitoring"]
+  prometheus-config:
+    driver: local
+    profiles: ["monitoring"]
+
+# Configurations
+configs:
+  beets_config:
+    content: |
+      directory: /music
+      library: /config/musiclibrary.db
+      
+      import:
+        write: yes
+        copy: yes
+        move: no
+        resume: ask
+        incremental: yes
+        quiet_fallback: skip
+        timid: no
+        log: /config/beet.log
+      
+      match:
+        strong_rec_thresh: 0.1
+        medium_rec_thresh: 0.25
+        rec_gap_thresh: 0.25
+      
+      paths:
+        default: $albumartist/$album/$track $title
+        singleton: Non-Album/$artist - $title
+        comp: Compilations/$album/$track $title
+      
+      plugins: web fetchart embedart scrub replaygain lastgenre chroma
+      
+      web:
+        host: 0.0.0.0
+        port: 8337
+      
+      fetchart:
+        auto: yes
+      
+      embedart:
+        auto: yes
+      
+      scrub:
+        auto: yes
+      
+      replaygain:
+        auto: no  # Can be resource intensive
+      
+      lastgenre:
+        auto: yes
+        source: album

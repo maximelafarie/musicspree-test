@@ -1,3 +1,5 @@
+import { Logger } from "../utils/Logger";
+
 export class Config {
   private static instance: Config;
 
@@ -40,28 +42,34 @@ export class Config {
   public readonly dryRun: boolean;
 
   private constructor() {
-    // LastFM
+    this.validateEnvironment();
+
+    // LastFM - Required
     this.lastfmApiKey = this.getEnvVar("LASTFM_API_KEY");
     this.lastfmUsername = this.getEnvVar("LASTFM_USERNAME");
     this.lastfmSharedSecret = this.getEnvVar("LASTFM_SHARED_SECRET");
 
-    // Navidrome
-    this.navidromeUrl = this.getEnvVar("NAVIDROME_URL");
+    // Navidrome - Required
+    this.navidromeUrl = this.validateUrl(this.getEnvVar("NAVIDROME_URL"));
     this.navidromeUsername = this.getEnvVar("NAVIDROME_USERNAME");
     this.navidromePassword = this.getEnvVar("NAVIDROME_PASSWORD");
 
-    // Soulseek
-    this.slskdUrl = this.getEnvVar("SLSKD_URL");
+    // Soulseek - Required
+    this.slskdUrl = this.validateUrl(this.getEnvVar("SLSKD_URL"));
     this.slskdApiKey = this.getEnvVar("SLSKD_API_KEY");
 
-    // Beets
-    this.beetsUrl = this.getEnvVar("BEETS_URL", "http://beets:8337");
+    // Beets - Optional
+    this.beetsUrl = this.validateUrl(
+      this.getEnvVar("BEETS_URL", "http://beets:8337")
+    );
     this.beetsConfigPath = this.getEnvVar("BEETS_CONFIG_PATH", "/config");
 
-    // Cron
-    this.cronSchedule = this.getEnvVar("CRON_SCHEDULE", "0 */6 * * *");
+    // Cron - Optional with validation
+    this.cronSchedule = this.validateCronSchedule(
+      this.getEnvVar("CRON_SCHEDULE", "0 */6 * * *")
+    );
 
-    // Playlist
+    // Playlist - Optional
     this.playlistName = this.getEnvVar(
       "PLAYLIST_NAME",
       "LastFM Recommendations"
@@ -75,23 +83,34 @@ export class Config {
       true
     );
 
-    // Download
-    this.maxDownloadRetries = parseInt(
-      this.getEnvVar("MAX_DOWNLOAD_RETRIES", "5")
+    // Download - Optional with validation
+    this.maxDownloadRetries = this.validatePositiveInteger(
+      this.getEnvVar("MAX_DOWNLOAD_RETRIES", "5"),
+      "MAX_DOWNLOAD_RETRIES",
+      1,
+      10
     );
-    this.downloadTimeoutMinutes = parseInt(
-      this.getEnvVar("DOWNLOAD_TIMEOUT_MINUTES", "10")
+    this.downloadTimeoutMinutes = this.validatePositiveInteger(
+      this.getEnvVar("DOWNLOAD_TIMEOUT_MINUTES", "10"),
+      "DOWNLOAD_TIMEOUT_MINUTES",
+      1,
+      60
     );
-    this.concurrentDownloads = parseInt(
-      this.getEnvVar("CONCURRENT_DOWNLOADS", "3")
+    this.concurrentDownloads = this.validatePositiveInteger(
+      this.getEnvVar("CONCURRENT_DOWNLOADS", "3"),
+      "CONCURRENT_DOWNLOADS",
+      1,
+      10
     );
 
-    // Logging
-    this.logLevel = this.getEnvVar("LOG_LEVEL", "info");
+    // Logging - Optional with validation
+    this.logLevel = this.validateLogLevel(this.getEnvVar("LOG_LEVEL", "info"));
     this.logToFile = this.getBooleanEnvVar("LOG_TO_FILE", true);
 
     // Other
     this.dryRun = this.getBooleanEnvVar("DRY_RUN", false);
+
+    this.logConfiguration();
   }
 
   public static getInstance(): Config {
@@ -99,6 +118,28 @@ export class Config {
       Config.instance = new Config();
     }
     return Config.instance;
+  }
+
+  private validateEnvironment(): void {
+    const requiredVars = [
+      "LASTFM_API_KEY",
+      "LASTFM_USERNAME",
+      "LASTFM_SHARED_SECRET",
+      "NAVIDROME_URL",
+      "NAVIDROME_USERNAME",
+      "NAVIDROME_PASSWORD",
+      "SLSKD_URL",
+      "SLSKD_API_KEY",
+    ];
+
+    const missingVars = requiredVars.filter((varName) => !process.env[varName]);
+
+    if (missingVars.length > 0) {
+      throw new Error(
+        `Missing required environment variables: ${missingVars.join(", ")}\n` +
+          "Please check your .env file or environment configuration."
+      );
+    }
   }
 
   private getEnvVar(name: string, defaultValue?: string): string {
@@ -109,7 +150,7 @@ export class Config {
       }
       throw new Error(`Environment variable ${name} is required`);
     }
-    return value;
+    return value.trim();
   }
 
   private getBooleanEnvVar(name: string, defaultValue: boolean): boolean {
@@ -117,6 +158,168 @@ export class Config {
     if (!value) {
       return defaultValue;
     }
-    return value.toLowerCase() === "true";
+    const lowerValue = value.toLowerCase().trim();
+    if (lowerValue === "true" || lowerValue === "1" || lowerValue === "yes") {
+      return true;
+    }
+    if (lowerValue === "false" || lowerValue === "0" || lowerValue === "no") {
+      return false;
+    }
+    throw new Error(
+      `Invalid boolean value for ${name}: ${value}. Use true/false, 1/0, or yes/no.`
+    );
+  }
+
+  private validateUrl(url: string): string {
+    try {
+      const parsedUrl = new URL(url);
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        throw new Error("URL must use HTTP or HTTPS protocol");
+      }
+      // Remove trailing slash
+      return url.replace(/\/$/, "");
+    } catch (error) {
+      throw new Error(
+        `Invalid URL: ${url}. ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+    }
+  }
+
+  private validatePositiveInteger(
+    value: string,
+    varName: string,
+    min: number = 1,
+    max?: number
+  ): number {
+    const num = parseInt(value, 10);
+    if (isNaN(num)) {
+      throw new Error(`${varName} must be a valid integer, got: ${value}`);
+    }
+    if (num < min) {
+      throw new Error(`${varName} must be at least ${min}, got: ${num}`);
+    }
+    if (max && num > max) {
+      throw new Error(`${varName} must be at most ${max}, got: ${num}`);
+    }
+    return num;
+  }
+
+  private validateLogLevel(level: string): string {
+    const validLevels = [
+      "error",
+      "warn",
+      "info",
+      "http",
+      "verbose",
+      "debug",
+      "silly",
+    ];
+    const lowerLevel = level.toLowerCase().trim();
+    if (!validLevels.includes(lowerLevel)) {
+      throw new Error(
+        `Invalid log level: ${level}. Valid levels are: ${validLevels.join(
+          ", "
+        )}`
+      );
+    }
+    return lowerLevel;
+  }
+
+  private validateCronSchedule(schedule: string): string {
+    // Basic cron validation - 5 parts separated by spaces
+    const parts = schedule.trim().split(/\s+/);
+    if (parts.length !== 5) {
+      throw new Error(
+        `Invalid cron schedule: ${schedule}. Must have 5 parts (minute hour day month weekday)`
+      );
+    }
+
+    // Validate each part is not empty
+    for (let i = 0; i < parts.length; i++) {
+      if (!parts[i]) {
+        throw new Error(
+          `Invalid cron schedule: ${schedule}. Part ${i + 1} is empty`
+        );
+      }
+    }
+
+    return schedule.trim();
+  }
+
+  private logConfiguration(): void {
+    // Only log in debug mode to avoid cluttering logs
+    if (process.env.LOG_LEVEL === "debug") {
+      const logger = Logger.getInstance();
+      logger.debug("Configuration loaded:", {
+        lastfm: {
+          username: this.lastfmUsername,
+          apiKeyLength: this.lastfmApiKey.length,
+        },
+        navidrome: {
+          url: this.navidromeUrl,
+          username: this.navidromeUsername,
+        },
+        slskd: {
+          url: this.slskdUrl,
+          apiKeyLength: this.slskdApiKey.length,
+        },
+        beets: {
+          url: this.beetsUrl,
+          configPath: this.beetsConfigPath,
+        },
+        playlist: {
+          name: this.playlistName,
+          cleanOnRefresh: this.cleanPlaylistsOnRefresh,
+          keepDownloaded: this.keepDownloadedTracks,
+        },
+        download: {
+          maxRetries: this.maxDownloadRetries,
+          timeoutMinutes: this.downloadTimeoutMinutes,
+          concurrent: this.concurrentDownloads,
+        },
+        schedule: this.cronSchedule,
+        dryRun: this.dryRun,
+      });
+    }
+  }
+
+  // Utility method to get sanitized config for CLI display
+  public getSanitizedConfig(): Record<string, any> {
+    return {
+      lastfm: {
+        username: this.lastfmUsername,
+        apiKey: this.lastfmApiKey.substring(0, 8) + "***",
+      },
+      navidrome: {
+        url: this.navidromeUrl,
+        username: this.navidromeUsername,
+      },
+      slskd: {
+        url: this.slskdUrl,
+        apiKey: this.slskdApiKey.substring(0, 8) + "***",
+      },
+      beets: {
+        url: this.beetsUrl,
+        configPath: this.beetsConfigPath,
+      },
+      playlist: {
+        name: this.playlistName,
+        cleanOnRefresh: this.cleanPlaylistsOnRefresh,
+        keepDownloaded: this.keepDownloadedTracks,
+      },
+      download: {
+        maxRetries: this.maxDownloadRetries,
+        timeoutMinutes: this.downloadTimeoutMinutes,
+        concurrent: this.concurrentDownloads,
+      },
+      schedule: this.cronSchedule,
+      logging: {
+        level: this.logLevel,
+        toFile: this.logToFile,
+      },
+      dryRun: this.dryRun,
+    };
   }
 }

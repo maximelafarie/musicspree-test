@@ -1,7 +1,12 @@
-FROM node:20-alpine
+# Multi-stage build for production
+FROM node:20-alpine AS builder
 
-# Install bash for CLI commands
-RUN apk add --no-cache bash curl
+# Install build dependencies
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    git
 
 WORKDIR /app
 
@@ -10,31 +15,75 @@ COPY package*.json ./
 COPY tsconfig.json ./
 COPY rolldown.config.js ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install all dependencies (including dev)
+RUN npm ci
 
 # Copy source code
 COPY src/ ./src/
-COPY bin/ ./bin/
 
 # Build the application
 RUN npm run build
 
-# Create non-root user
+# Production stage
+FROM node:20-alpine
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    bash \
+    curl \
+    findutils \
+    coreutils \
+    beets \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm ci --only=production --ignore-scripts \
+    && npm cache clean --force
+
+# Copy built application from builder stage
+COPY --from=builder /app/dist/ ./dist/
+
+# Copy CLI script
+COPY bin/spree ./bin/spree
+
+# Create non-root user with proper permissions
 RUN addgroup -g 1001 -S musicspree && \
-    adduser -S musicspree -u 1001 -G musicspree
+    adduser -S musicspree -u 1001 -G musicspree && \
+    mkdir -p /app/data /downloads /music && \
+    chown -R musicspree:musicspree /app /downloads /music && \
+    chmod +x /app/bin/spree
 
-# Create data directory
-RUN mkdir -p /app/data && chown -R musicspree:musicspree /app
+# Create symlink for global access
+RUN ln -sf /app/bin/spree /usr/local/bin/spree
 
+# Switch to non-root user
 USER musicspree
 
-# Make CLI commands executable
-RUN chmod +x /app/bin/spree
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD node /app/dist/cli.js test || exit 1
 
-# Add bin to PATH
+# Set environment variables
+ENV NODE_ENV=production
 ENV PATH="/app/bin:$PATH"
 
+# Expose port (if web interface is added later)
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Create volume mount points
+VOLUME ["/app/data", "/downloads", "/music"]
+
+# Default command
+CMD ["node", "/app/dist/index.js"]
+
+# Labels for better container management
+LABEL org.opencontainers.image.title="MusicSpree" \
+    org.opencontainers.image.description="Automated music recommendation fetcher and playlist manager" \
+    org.opencontainers.image.version="1.0.0" \
+    org.opencontainers.image.source="https://github.com/votre-username/musicspree" \
+    maintainer="musicspree@example.com"
