@@ -1,24 +1,29 @@
 import { Config } from "../config";
 import { Logger } from "../utils";
-import { BeetsService, LastFMService, NavidromeService, SlskdService } from "../services";
+import {
+  BeetsService,
+  LastFMService,
+  NavidromeService,
+  SlskdService,
+} from "../services";
 import { Track, NavidromeTrack, PlaylistSyncResult } from "../types";
 import winston from "winston";
 
 export class MusicSpree {
   private config: Config;
   private logger: winston.Logger;
-  private lastfmService: LastFMService;
-  private navidromeService: NavidromeService;
-  private slskdService: SlskdService;
-  private beetsService: BeetsService;
+  private _lastfmService: LastFMService;
+  private _navidromeService: NavidromeService;
+  private _slskdService: SlskdService;
+  private _beetsService: BeetsService;
 
   constructor() {
     this.config = Config.getInstance();
     this.logger = Logger.getInstance();
-    this.lastfmService = new LastFMService();
-    this.navidromeService = new NavidromeService();
-    this.slskdService = new SlskdService();
-    this.beetsService = new BeetsService();
+    this._lastfmService = new LastFMService();
+    this._navidromeService = new NavidromeService();
+    this._slskdService = new SlskdService();
+    this._beetsService = new BeetsService();
   }
 
   async validateConfig(): Promise<void> {
@@ -28,7 +33,7 @@ export class MusicSpree {
 
     // Test LastFM connection
     try {
-      await this.lastfmService.testConnection();
+      await this._lastfmService.testConnection();
       this.logger.debug("✅ LastFM connection OK");
     } catch (error) {
       const errorMsg = `LastFM connection failed: ${
@@ -40,7 +45,7 @@ export class MusicSpree {
 
     // Test Navidrome connection
     try {
-      await this.navidromeService.testConnection();
+      await this._navidromeService.testConnection();
       this.logger.debug("✅ Navidrome connection OK");
     } catch (error) {
       const errorMsg = `Navidrome connection failed: ${
@@ -52,7 +57,7 @@ export class MusicSpree {
 
     // Test Slskd connection
     try {
-      await this.slskdService.testConnection();
+      await this._slskdService.testConnection();
       this.logger.debug("✅ Slskd connection OK");
     } catch (error) {
       const errorMsg = `Slskd connection failed: ${
@@ -64,7 +69,7 @@ export class MusicSpree {
 
     // Test Beets connection (optional - warn but don't fail)
     try {
-      await this.beetsService.testConnection();
+      await this._beetsService.testConnection();
       this.logger.debug("✅ Beets connection OK");
     } catch (error) {
       this.logger.warn(
@@ -97,7 +102,7 @@ export class MusicSpree {
     try {
       // 1. Get recommendations from LastFM
       this.logger.info("📡 Fetching LastFM recommendations...");
-      const recommendations = await this.lastfmService.getRecommendations(
+      const recommendations = await this._lastfmService.getRecommendations(
         limit || 50
       );
       result.totalRecommendations = recommendations.length;
@@ -144,7 +149,7 @@ export class MusicSpree {
       if (result.newDownloads > 0) {
         this.logger.info("🏷️ Processing new tracks with Beets...");
         try {
-          await this.beetsService.importNewTracks();
+          await this._beetsService.importNewTracks();
           this.logger.info("✅ Beets processing completed");
 
           // Small delay to let Navidrome discover new files
@@ -188,7 +193,7 @@ export class MusicSpree {
     this.logger.info("🏃‍♂️ Running dry run...");
 
     try {
-      const recommendations = await this.lastfmService.getRecommendations(
+      const recommendations = await this._lastfmService.getRecommendations(
         limit || 50
       );
 
@@ -216,7 +221,7 @@ export class MusicSpree {
   async clearPlaylist(): Promise<void> {
     this.logger.info("🗑️ Clearing playlist...");
     try {
-      await this.navidromeService.deletePlaylist(this.config.playlistName);
+      await this._navidromeService.deletePlaylist(this.config.playlistName);
       this.logger.info("✅ Playlist cleared");
     } catch (error) {
       this.logger.error("❌ Failed to clear playlist:", error);
@@ -244,7 +249,7 @@ export class MusicSpree {
 
       const chunkPromises = chunk.map(async (track) => {
         try {
-          const found = await this.navidromeService.searchTrack(
+          const found = await this._navidromeService.searchTrack(
             track.artist,
             track.title
           );
@@ -305,7 +310,7 @@ export class MusicSpree {
           this.logger.debug(
             `Attempting download: ${track.artist} - ${track.title}`
           );
-          const success = await this.slskdService.downloadTrack(track);
+          const success = await this._slskdService.downloadTrack(track);
 
           if (success) {
             successful.push(track);
@@ -357,7 +362,7 @@ export class MusicSpree {
       // Clean existing playlist if configured
       if (this.config.cleanPlaylistsOnRefresh) {
         try {
-          await this.navidromeService.deletePlaylist(this.config.playlistName);
+          await this._navidromeService.deletePlaylist(this.config.playlistName);
           this.logger.debug(
             `Deleted existing playlist: ${this.config.playlistName}`
           );
@@ -380,7 +385,7 @@ export class MusicSpree {
       for (const chunk of chunks) {
         const chunkPromises = chunk.map(async (track) => {
           try {
-            const found = await this.navidromeService.searchTrack(
+            const found = await this._navidromeService.searchTrack(
               track.artist,
               track.title
             );
@@ -407,7 +412,7 @@ export class MusicSpree {
 
       if (playlistTracks.length > 0) {
         try {
-          await this.navidromeService.createOrUpdatePlaylist(
+          await this._navidromeService.createOrUpdatePlaylist(
             this.config.playlistName,
             playlistTracks
           );
@@ -465,16 +470,19 @@ export class MusicSpree {
   }
 
   // Public getters for CLI access to services (for testing)
-  public get lastfmService() {
-    return this.lastfmService;
+  public get lastfmService(): LastFMService {
+    return this._lastfmService;
   }
-  public get navidromeService() {
-    return this.navidromeService;
+
+  public get navidromeService(): NavidromeService {
+    return this._navidromeService;
   }
-  public get slskdService() {
-    return this.slskdService;
+
+  public get slskdService(): SlskdService {
+    return this._slskdService;
   }
-  public get beetsService() {
-    return this.beetsService;
+
+  public get beetsService(): BeetsService {
+    return this._beetsService;
   }
 }
