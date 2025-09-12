@@ -1,8 +1,16 @@
+#!/usr/bin/env node
+
 import dotenv from "dotenv";
 import cron from "node-cron";
-import { MusicSpree } from "./core/MusicSpree";
-import { Logger } from "./utils/Logger";
-import { Config } from "./config/Config";
+import { fileURLToPath } from 'url';
+import path from 'path';
+import { MusicSpree } from "./core/MusicSpree.js";
+import { Logger } from "./utils/Logger.js";
+import { Config } from "./config/Config.js";
+
+// ES modules equivalent of __dirname and __filename
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables
 dotenv.config();
@@ -130,8 +138,11 @@ function getNextCronTime(cronExpression: string): string {
   }
 }
 
+// ES modules equivalent of require.main === module
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+
 // Only run if this file is executed directly
-if (require.main === module) {
+if (isMainModule) {
   main().catch((error) => {
     console.error("💥 Fatal error:", error);
     process.exit(1);

@@ -111,7 +111,9 @@ export class Config {
     // Log configuration only in debug mode and only after logger is ready
     if (this.logLevel === "debug") {
       // Use setTimeout to avoid circular dependency during initialization
-      setTimeout(() => this.logConfiguration(), 0);
+      setTimeout(() => {
+        this.logConfiguration();
+      }, 0);
     }
   }
 
@@ -250,10 +252,10 @@ export class Config {
     return schedule.trim();
   }
 
-  private logConfiguration(): void {
+  private async logConfiguration(): Promise<void> {
     // Import Logger here to avoid circular dependency
     try {
-      const { Logger } = require("../utils/Logger");
+      const { Logger } = await import("../utils/Logger");
       const logger = Logger.getInstance();
 
       logger.debug("Configuration loaded:", {

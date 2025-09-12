@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from "child_process";
 import dotenv from "dotenv";
 import { Command } from "commander";
 import { MusicSpree } from "./core/MusicSpree";
@@ -402,7 +403,6 @@ program
   .option("--follow", "Follow logs in real time")
   .action(async (options) => {
     try {
-      const { spawn } = require("child_process");
       const logFile = "/app/data/musicspree.log";
 
       const tailLines = parseInt(options.tail, 10) || 50;

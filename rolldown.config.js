@@ -1,7 +1,10 @@
 import { defineConfig } from 'rolldown';
 
 export default defineConfig({
-    input: 'src/index.ts',
+    input: {
+        index: 'src/index.ts',
+        cli: 'src/cli.ts'
+    },
     output: {
         dir: 'dist',
         format: 'esm',
@@ -14,6 +17,8 @@ export default defineConfig({
         'fs',
         'path',
         'child_process',
+        'url',
+        'process',
 
         // NPM dependencies
         'node-cron',
@@ -24,5 +29,8 @@ export default defineConfig({
     ],
     resolve: {
         extensions: ['.ts', '.js']
-    }
+    },
+    // Configuration pour ES modules
+    platform: 'node',
+    target: 'es2022'
 });
