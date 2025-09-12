@@ -13,7 +13,7 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 COPY tsconfig.json ./
-COPY rolldown.config.js ./
+COPY build.mjs ./
 
 # Install all dependencies (including dev)
 RUN npm ci
