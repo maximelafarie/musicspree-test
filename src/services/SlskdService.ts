@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from "axios";
+import axios, { AxiosInstance, AxiosError } from "axios";
 import { Config } from "../config/Config";
 import { Logger } from "../utils/Logger";
 import { Track } from "../types/Track";
@@ -19,21 +19,87 @@ export class SlskdService {
         "X-API-Key": this.config.slskdApiKey,
         "Content-Type": "application/json",
       },
+      // Ajout de la validation des certificats SSL pour le debugging
+      validateStatus: (status) => status < 500, // Accepter tous les codes < 500
     });
+
+    // Log de la configuration pour debugging
+    this.logger.debug(`SlskdService initialized with URL: ${this.config.slskdUrl}`);
+    this.logger.debug(`API Key configured: ${this.config.slskdApiKey ? 'Yes' : 'No'}`);
   }
 
   async testConnection(): Promise<void> {
     try {
+      this.logger.debug(`Testing connection to: ${this.config.slskdUrl}/api/v0/session`);
+      
       const response = await this.client.get("/api/v0/session");
 
-      if (!response.data || response.status !== 200) {
-        throw new Error("Invalid response from slskd");
+      this.logger.debug(`Response status: ${response.status}`);
+      this.logger.debug(`Response headers:`, response.headers);
+      this.logger.debug(`Response data:`, JSON.stringify(response.data, null, 2));
+
+      // Vérification plus flexible de la réponse
+      if (response.status !== 200) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      this.logger.debug("Slskd connection test successful");
+      // Vérifier si la réponse contient des données (même si c'est juste un objet vide)
+      if (response.data === undefined || response.data === null) {
+        throw new Error("Empty response from slskd");
+      }
+
+      this.logger.info("✅ Slskd connection test successful");
+      this.logger.debug(`Connected to slskd version: ${response.data.version || 'unknown'}`);
+      
     } catch (error) {
-      this.logger.error("Slskd connection test failed:", error);
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        this.logger.error("Slskd connection test failed (Axios Error):");
+        this.logger.error(`- URL: ${axiosError.config?.url}`);
+        this.logger.error(`- Method: ${axiosError.config?.method}`);
+        this.logger.error(`- Status: ${axiosError.response?.status}`);
+        this.logger.error(`- Status Text: ${axiosError.response?.statusText}`);
+        this.logger.error(`- Response Data:`, axiosError.response?.data);
+        this.logger.error(`- Request Headers:`, axiosError.config?.headers);
+        
+        if (axiosError.code) {
+          this.logger.error(`- Error Code: ${axiosError.code}`);
+        }
+        
+        if (axiosError.message) {
+          this.logger.error(`- Error Message: ${axiosError.message}`);
+        }
+
+        // Erreurs réseau communes
+        if (axiosError.code === 'ECONNREFUSED') {
+          throw new Error(`Connection refused to ${this.config.slskdUrl}. Is slskd running and accessible?`);
+        } else if (axiosError.code === 'ENOTFOUND') {
+          throw new Error(`Host not found: ${this.config.slskdUrl}. Check the URL.`);
+        } else if (axiosError.code === 'ETIMEDOUT') {
+          throw new Error(`Connection timeout to ${this.config.slskdUrl}. Check network connectivity.`);
+        } else if (axiosError.response?.status === 401) {
+          throw new Error(`Unauthorized access to slskd. Check your API key.`);
+        } else if (axiosError.response?.status === 403) {
+          throw new Error(`Forbidden access to slskd. Check API key permissions.`);
+        } else if (axiosError.response?.status === 404) {
+          throw new Error(`Endpoint not found. Check slskd version and API compatibility.`);
+        }
+      } else {
+        this.logger.error("Slskd connection test failed (General Error):", error);
+      }
+      
       throw error;
+    }
+  }
+
+  async getApiInfo(): Promise<any> {
+    try {
+      // Essayer d'obtenir des informations sur l'API
+      const response = await this.client.get("/api/v0/");
+      return response.data;
+    } catch (error) {
+      this.logger.debug("Could not get API info:", error);
+      return null;
     }
   }
 
@@ -110,6 +176,7 @@ export class SlskdService {
   private async searchTrack(track: Track): Promise<any[]> {
     try {
       const searchQuery = `${track.artist} ${track.title}`;
+      this.logger.debug(`Searching for: "${searchQuery}"`);
 
       const response = await this.client.post("/api/v0/searches", {
         searchText: searchQuery,
@@ -121,6 +188,7 @@ export class SlskdService {
       }
 
       const searchId = response.data.id;
+      this.logger.debug(`Search initiated with ID: ${searchId}`);
 
       // Wait for search results
       await this.sleep(3000);
@@ -130,6 +198,7 @@ export class SlskdService {
       );
 
       if (!resultsResponse.data?.responses) {
+        this.logger.debug("No responses in search results");
         return [];
       }
 
@@ -148,6 +217,7 @@ export class SlskdService {
         }
       }
 
+      this.logger.debug(`Found ${allFiles.length} files in search results`);
       return allFiles;
     } catch (error) {
       this.logger.error(
@@ -170,6 +240,14 @@ export class SlskdService {
     // Sort by score (highest first)
     scoredResults.sort((a, b) => b.score - a.score);
 
+    // Log top results for debugging
+    this.logger.debug("Top 3 search results:");
+    scoredResults.slice(0, 3).forEach((result, index) => {
+      this.logger.debug(
+        `${index + 1}. ${result.file.filename} (score: ${result.score.toFixed(2)})`
+      );
+    });
+
     // Filter by minimum quality
     const qualityFiltered = scoredResults.filter(
       (result) =>
@@ -177,7 +255,13 @@ export class SlskdService {
         this.isAcceptableQuality(result.file)
     );
 
-    return qualityFiltered.length > 0 ? qualityFiltered[0].file : null;
+    if (qualityFiltered.length > 0) {
+      this.logger.debug(`Selected: ${qualityFiltered[0].file.filename}`);
+      return qualityFiltered[0].file;
+    }
+
+    this.logger.debug("No files passed quality filter");
+    return null;
   }
 
   private calculateMatchScore(file: any, track: Track): number {
@@ -250,12 +334,17 @@ export class SlskdService {
         ],
       };
 
+      this.logger.debug(`Initiating download:`, downloadRequest);
+
       const response = await this.client.post(
         "/api/v0/transfers/downloads",
         downloadRequest
       );
 
-      return response.status === 200 || response.status === 201;
+      const success = response.status === 200 || response.status === 201;
+      this.logger.debug(`Download initiation ${success ? 'successful' : 'failed'}`);
+      
+      return success;
     } catch (error) {
       this.logger.error("Failed to initiate download:", error);
       return false;
@@ -270,6 +359,8 @@ export class SlskdService {
       (maxWaitMinutes || this.config.downloadTimeoutMinutes) * 60 * 1000;
     const startTime = Date.now();
     const checkInterval = 5000; // Check every 5 seconds
+
+    this.logger.debug(`Waiting for download completion (max ${maxWaitMinutes || this.config.downloadTimeoutMinutes} minutes)`);
 
     while (Date.now() - startTime < maxWait) {
       try {
@@ -289,6 +380,8 @@ export class SlskdService {
             download.username === file.username &&
             download.files?.some((f: any) => f.filename === file.filename)
           ) {
+            this.logger.debug(`Download state: ${download.state}`);
+            
             if (download.state === "Completed") {
               return true;
             } else if (
