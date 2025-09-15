@@ -3,6 +3,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { Config } from "../config/Config";
 import { Logger } from "../utils/Logger";
+import { RecommendationsManager } from "./RecommendationsManager";
 import winston from "winston";
 
 const execAsync = promisify(exec);
@@ -11,10 +12,12 @@ export class BeetsService {
   private config: Config;
   private logger: winston.Logger;
   private client?: AxiosInstance;
+  private recommendationsManager: RecommendationsManager;
 
   constructor() {
     this.config = Config.getInstance();
     this.logger = Logger.getInstance();
+    this.recommendationsManager = new RecommendationsManager();
 
     // Initialize HTTP client if beets web plugin is available
     try {
@@ -89,6 +92,28 @@ export class BeetsService {
       await this.cliImport(pathToImport);
     } catch (error) {
       this.logger.error("Failed to import tracks with beets:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Import spécifique pour les recommendations - traite et organise dans le dossier recommendations
+   */
+  async importToRecommendations(
+    importPath: string = "/downloads"
+  ): Promise<string[]> {
+    try {
+      this.logger.info(`🏷️ Importing to recommendations from: ${importPath}`);
+
+      // Import avec destination spécifique vers le dossier processing
+      const importedFiles = await this.cliImportToRecommendations(importPath);
+
+      this.logger.info(
+        `✅ Imported ${importedFiles.length} files to recommendations`
+      );
+      return importedFiles;
+    } catch (error) {
+      this.logger.error("Failed to import to recommendations:", error);
       throw error;
     }
   }
@@ -276,14 +301,103 @@ export class BeetsService {
     }
   }
 
+  private async cliImportToRecommendations(
+    sourcePath: string
+  ): Promise<string[]> {
+    try {
+      // Import avec destination spécifique vers le dossier processing des recommendations
+      const destinationPath = this.config.recommendationsProcessingPath;
+
+      const importCommand = [
+        "beet import",
+        "--autotag", // Auto-tag files
+        "--write", // Write tags to files
+        "--move", // Move files instead of copy (since it's going to recommendations)
+        "--quiet", // Reduce output
+        "--noincremental", // Don't skip already imported albums
+        `--dest "${destinationPath}"`, // Destination spécifique
+        `"${sourcePath}"`,
+      ].join(" ");
+
+      this.logger.debug(`Executing recommendations import: ${importCommand}`);
+
+      const { stdout, stderr } = await execAsync(importCommand, {
+        timeout: 300000, // 5 minutes timeout
+        env: {
+          ...process.env,
+          BEETSDIR: this.config.beetsConfigPath,
+          BEETS_AUTO: "1",
+        },
+      });
+
+      if (stderr && !stderr.includes("Sending event")) {
+        this.logger.debug("Beets recommendations import warnings:", stderr);
+      }
+
+      // Parser la sortie pour récupérer les fichiers importés
+      const importedFiles = this.parseImportedFiles(stdout);
+
+      this.logger.info(
+        `✅ ${importedFiles.length} tracks imported to recommendations`
+      );
+      return importedFiles;
+    } catch (error: any) {
+      // Fallback: import normal puis déplacer manuellement
+      this.logger.warn(
+        "Direct recommendations import failed, using fallback method:",
+        error
+      );
+      return await this.fallbackImportToRecommendations(sourcePath);
+    }
+  }
+
+  private async fallbackImportToRecommendations(
+    sourcePath: string
+  ): Promise<string[]> {
+    try {
+      // Import normal
+      await this.cliImport(sourcePath);
+
+      // TODO: Identifier et déplacer les fichiers récemment importés
+      // Pour l'instant, retourner une liste vide et laisser le RecommendationsManager gérer
+      this.logger.warn(
+        "Using fallback import - manual file management required"
+      );
+      return [];
+    } catch (error) {
+      this.logger.error("Fallback import to recommendations failed:", error);
+      throw error;
+    }
+  }
+
+  private parseImportedFiles(stdout: string): string[] {
+    const importedFiles: string[] = [];
+
+    // Parser la sortie de beets pour extraire les chemins des fichiers
+    const lines = stdout.split("\n");
+
+    for (const line of lines) {
+      // Chercher des patterns comme "path/to/file.mp3" dans la sortie
+      const matches = line.match(
+        /([\/\w\-\. ]+\.(mp3|flac|wav|m4a|ogg|aac))/gi
+      );
+      if (matches) {
+        importedFiles.push(...matches);
+      }
+    }
+
+    return [...new Set(importedFiles)]; // Dédoublonner
+  }
+
   async cleanupEmptyDirectories(): Promise<void> {
     try {
       this.logger.info("🧹 Cleaning up empty directories...");
 
-      // Manual cleanup of common download and music directories
+      // Manual cleanup of common download, music directories, and recommendations
       const cleanupCommands = [
         "find /downloads -type d -empty -delete 2>/dev/null || true",
         "find /music -type d -empty -delete 2>/dev/null || true",
+        `find "${this.config.recommendationsFolder}" -type d -empty -delete 2>/dev/null || true`,
         // Clean up any temporary beets files
         'find /tmp -name "beets_*" -type f -mtime +1 -delete 2>/dev/null || true',
       ];
@@ -340,6 +454,43 @@ export class BeetsService {
     } catch (error) {
       this.logger.error("Failed to move files to library:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Import spécifique qui retourne les chemins des fichiers traités
+   */
+  async importAndReturnPaths(
+    sourcePath: string
+  ): Promise<{ originalPaths: string[]; importedPaths: string[] }> {
+    try {
+      // Lister les fichiers avant import
+      const originalPaths = await this.listAudioFiles(sourcePath);
+
+      // Effectuer l'import
+      const importedPaths = await this.importToRecommendations(sourcePath);
+
+      return { originalPaths, importedPaths };
+    } catch (error) {
+      this.logger.error("Failed to import and return paths:", error);
+      throw error;
+    }
+  }
+
+  private async listAudioFiles(directory: string): Promise<string[]> {
+    try {
+      const { stdout } = await execAsync(
+        `find "${directory}" -type f \\( -name "*.mp3" -o -name "*.flac" -o -name "*.wav" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.aac" \\) 2>/dev/null || true`,
+        { timeout: 30000 }
+      );
+
+      return stdout
+        .split("\n")
+        .filter((path) => path.trim().length > 0)
+        .map((path) => path.trim());
+    } catch (error) {
+      this.logger.debug(`Failed to list audio files in ${directory}:`, error);
+      return [];
     }
   }
 }

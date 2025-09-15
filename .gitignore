@@ -102,3 +102,6 @@ backup-*
 # Test files
 test-results/
 coverage/
+
+# Containers
+containers/

@@ -13,8 +13,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./src:/app/src  # For development hot-reload
-      - downloads:/downloads
-      - music:/music
+      - ./containers/downloads:/downloads
+      - ./containers/music-library:/music/library:ro          # Bibliothèque principale (READ-ONLY)
+      - ./containers/music-recommendations:/music/recommendations:rw  # Dossier géré par MusicSpree
     depends_on:
       - navidrome
       - slskd
@@ -33,23 +34,16 @@ services:
   navidrome:
     image: deluan/navidrome:latest
     container_name: navidrome
+    hostname: navidrome
     restart: unless-stopped
+    user: 501:20
     ports:
       - "4533:4533"
-    environment:
-      - ND_SCANSCHEDULE=15m
-      - ND_LOGLEVEL=info  
-      - ND_SESSIONTIMEOUT=24h
-      - ND_BASEURL=""
-      - ND_ENABLETRANSCODINGCONFIG=true
-      - ND_MUSICFOLDER=/music
-      - ND_DATAFOLDER=/data
-      - ND_CACHEFOLDER=/data/cache
-      - ND_ENABLESHARING=false
-      - ND_ENABLEEXTERNALSERVICES=false
+    env_file: ./containers/navidrome/navidrome.env
     volumes:
-      - navidrome-data:/data
-      - music:/music:ro
+      - ./containers/navidrome/data:/data
+      - ./containers/music-library:/music/library:ro           # Bibliothèque principale
+      - ./containers/music-recommendations:/music/recommendations:ro  # Recommendations
     networks:
       - musicspree-network
     healthcheck:
@@ -61,6 +55,7 @@ services:
   slskd:
     image: slskd/slskd:latest
     container_name: slskd
+    hostname: slskd
     restart: unless-stopped
     ports:
       - "5030:5030"   # Web interface
@@ -70,12 +65,16 @@ services:
       - SLSKD_NO_HTTPS=false
       - SLSKD_HTTP_PORT=5030
       - SLSKD_HTTPS_DISABLED=true
+      - SLSKD_DOWNLOADS_DIR=/downloads/complete
+      - SLSKD_INCOMPLETE_DIR=/downloads/incomplete
+      - SLSKD_SHARED_DIR=/data
     env_file:
       - .env
     volumes:
-      - slskd-data:/app
-      - slskd-config:/app/config
-      - downloads:/downloads
+      - ./containers/slskd/data:/app
+      - ./containers/slskd/config:/app/config
+      - ./containers/downloads:/downloads
+      - ./containers/music-library:/data
     networks:
       - musicspree-network
     healthcheck:
@@ -88,17 +87,17 @@ services:
   beets:
     image: lscr.io/linuxserver/beets:latest
     container_name: beets
+    hostname: beets
     restart: unless-stopped
     ports:
       - "8337:8337"
     environment:
-      - PUID=1001
-      - PGID=1001
       - TZ=UTC
     volumes:
-      - beets-config:/config
-      - downloads:/downloads
-      - music:/music
+      - ./containers/beets/config:/config
+      - ./containers/downloads:/downloads
+      - ./containers/music-library:/music/library           # Bibliothèque principale (pour référence)
+      - ./containers/music-recommendations:/music/recommendations  # Dossier de destination pour les recommendations
     networks:
       - musicspree-network
     healthcheck:
@@ -121,25 +120,12 @@ networks:
       config:
         - subnet: 172.20.0.0/16
 
-volumes:
-  downloads:
-    driver: local
-  music:
-    driver: local
-  navidrome-data:
-    driver: local
-  slskd-data:
-    driver: local
-  slskd-config:
-    driver: local
-  beets-config:
-    driver: local
-
 # Configurations
 configs:
   beets_config:
     content: |
-      directory: /music
+      # Configuration Beets adaptée pour l'architecture recommendations
+      directory: /music/recommendations  # Par défaut, importer vers recommendations
       library: /config/musiclibrary.db
       
       import:
@@ -158,11 +144,17 @@ configs:
         rec_gap_thresh: 0.25
       
       paths:
+        # Chemins adaptés pour les recommendations
         default: $albumartist/$album/$track $title
-        singleton: Non-Album/$artist - $title
+        singleton: Singles/$artist - $title
         comp: Compilations/$album/$track $title
+        
+        # Règles spécifiques pour différents types
+        albumtype:soundtrack: Soundtracks/$album/$track $title
+        albumtype:compilation: Compilations/$album/$track $title
+        albumtype:live: Live/$albumartist/$album/$track $title
       
-      plugins: web fetchart embedart scrub replaygain lastgenre chroma
+      plugins: web fetchart embedart scrub replaygain lastgenre chroma duplicates
       
       web:
         host: 0.0.0.0
@@ -170,16 +162,55 @@ configs:
       
       fetchart:
         auto: yes
+        sources: coverart itunes amazon albumart wikipedia google bing
+        store_source: yes
       
       embedart:
         auto: yes
+        maxwidth: 1000
+        quality: 95
       
       scrub:
         auto: yes
       
       replaygain:
-        auto: no  # Can be resource intensive
+        auto: no  # Peut être gourmand en ressources, désactivé par défaut
+        backend: gstreamer
       
       lastgenre:
         auto: yes
         source: album
+        fallback: unknown
+        canonical: yes
+      
+      chroma:
+        auto: yes
+      
+      duplicates:
+        album: no
+        checksum: yes
+        copy: no
+        count: no
+        delete: no
+        full: no
+        keys: []
+        move: no
+        path: no
+        strict: no
+        tag: no
+        tiebreak: {}
+        
+      # Configuration pour les différents dossiers
+      paths_functions:
+        # Fonction pour organiser par type de contenu
+        recommendations: |
+          if albumtype == 'soundtrack':
+              return 'Soundtracks'
+          elif albumtype == 'compilation':
+              return 'Compilations'  
+          elif albumtype == 'live':
+              return 'Live'
+          elif comp:
+              return 'Compilations'
+          else:
+              return 'Albums'

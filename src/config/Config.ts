@@ -32,6 +32,15 @@ export class Config {
   public readonly downloadTimeoutMinutes: number;
   public readonly concurrentDownloads: number;
 
+  // Recommendations Management - NOUVEAU
+  public readonly recommendationsFolder: string;
+  public readonly recommendationsMaxTracks: number;
+  public readonly recommendationsMaxAgeDays: number;
+  public readonly rotationStrategy: "oldest_first" | "least_played" | "random";
+  public readonly enableCleanupOnStartup: boolean;
+  public readonly enableArchive: boolean;
+  public readonly archiveMaxTracks: number;
+
   // Logging
   public readonly logLevel: string;
   public readonly logToFile: boolean;
@@ -101,6 +110,38 @@ export class Config {
       10
     );
 
+    // Recommendations Management - NOUVEAU
+    this.recommendationsFolder = this.getEnvVar(
+      "RECOMMENDATIONS_FOLDER",
+      "/music/recommendations"
+    );
+    this.recommendationsMaxTracks = this.validatePositiveInteger(
+      this.getEnvVar("RECOMMENDATIONS_MAX_TRACKS", "200"),
+      "RECOMMENDATIONS_MAX_TRACKS",
+      10,
+      1000
+    );
+    this.recommendationsMaxAgeDays = this.validatePositiveInteger(
+      this.getEnvVar("RECOMMENDATIONS_MAX_AGE_DAYS", "30"),
+      "RECOMMENDATIONS_MAX_AGE_DAYS",
+      1,
+      365
+    );
+    this.rotationStrategy = this.validateRotationStrategy(
+      this.getEnvVar("ROTATION_STRATEGY", "oldest_first")
+    );
+    this.enableCleanupOnStartup = this.getBooleanEnvVar(
+      "ENABLE_CLEANUP_ON_STARTUP",
+      true
+    );
+    this.enableArchive = this.getBooleanEnvVar("ENABLE_ARCHIVE", true);
+    this.archiveMaxTracks = this.validatePositiveInteger(
+      this.getEnvVar("ARCHIVE_MAX_TRACKS", "500"),
+      "ARCHIVE_MAX_TRACKS",
+      50,
+      2000
+    );
+
     // Logging - Optional with validation
     this.logLevel = this.validateLogLevel(this.getEnvVar("LOG_LEVEL", "info"));
     this.logToFile = this.getBooleanEnvVar("LOG_TO_FILE", true);
@@ -110,7 +151,6 @@ export class Config {
 
     // Log configuration only in debug mode and only after logger is ready
     if (this.logLevel === "debug") {
-      // Use setTimeout to avoid circular dependency during initialization
       setTimeout(() => {
         this.logConfiguration();
       }, 0);
@@ -180,7 +220,6 @@ export class Config {
       if (!["http:", "https:"].includes(parsedUrl.protocol)) {
         throw new Error("URL must use HTTP or HTTPS protocol");
       }
-      // Remove trailing slash
       return url.replace(/\/$/, "");
     } catch (error) {
       throw new Error(
@@ -232,7 +271,6 @@ export class Config {
   }
 
   private validateCronSchedule(schedule: string): string {
-    // Basic cron validation - 5 parts separated by spaces
     const parts = schedule.trim().split(/\s+/);
     if (parts.length !== 5) {
       throw new Error(
@@ -240,7 +278,6 @@ export class Config {
       );
     }
 
-    // Validate each part is not empty
     for (let i = 0; i < parts.length; i++) {
       if (!parts[i]) {
         throw new Error(
@@ -252,8 +289,24 @@ export class Config {
     return schedule.trim();
   }
 
+  private validateRotationStrategy(
+    strategy: string
+  ): "oldest_first" | "least_played" | "random" {
+    const validStrategies = ["oldest_first", "least_played", "random"];
+    const lowerStrategy = strategy.toLowerCase().trim();
+
+    if (!validStrategies.includes(lowerStrategy as any)) {
+      throw new Error(
+        `Invalid rotation strategy: ${strategy}. Valid strategies are: ${validStrategies.join(
+          ", "
+        )}`
+      );
+    }
+
+    return lowerStrategy as "oldest_first" | "least_played" | "random";
+  }
+
   private async logConfiguration(): Promise<void> {
-    // Import Logger here to avoid circular dependency
     try {
       const { Logger } = await import("../utils/Logger");
       const logger = Logger.getInstance();
@@ -280,6 +333,14 @@ export class Config {
           cleanOnRefresh: this.cleanPlaylistsOnRefresh,
           keepDownloaded: this.keepDownloadedTracks,
         },
+        recommendations: {
+          folder: this.recommendationsFolder,
+          maxTracks: this.recommendationsMaxTracks,
+          maxAgeDays: this.recommendationsMaxAgeDays,
+          rotationStrategy: this.rotationStrategy,
+          enableArchive: this.enableArchive,
+          archiveMaxTracks: this.archiveMaxTracks,
+        },
         download: {
           maxRetries: this.maxDownloadRetries,
           timeoutMinutes: this.downloadTimeoutMinutes,
@@ -289,12 +350,10 @@ export class Config {
         dryRun: this.dryRun,
       });
     } catch (error) {
-      // Ignore logging errors during initialization
       console.debug("Could not log configuration:", error);
     }
   }
 
-  // Utility method to get sanitized config for CLI display
   public getSanitizedConfig(): Record<string, any> {
     return {
       lastfm: {
@@ -318,6 +377,14 @@ export class Config {
         cleanOnRefresh: this.cleanPlaylistsOnRefresh,
         keepDownloaded: this.keepDownloadedTracks,
       },
+      recommendations: {
+        folder: this.recommendationsFolder,
+        maxTracks: this.recommendationsMaxTracks,
+        maxAgeDays: this.recommendationsMaxAgeDays,
+        rotationStrategy: this.rotationStrategy,
+        enableArchive: this.enableArchive,
+        archiveMaxTracks: this.archiveMaxTracks,
+      },
       download: {
         maxRetries: this.maxDownloadRetries,
         timeoutMinutes: this.downloadTimeoutMinutes,
@@ -330,5 +397,18 @@ export class Config {
       },
       dryRun: this.dryRun,
     };
+  }
+
+  // Utility methods pour les chemins
+  public get recommendationsCurrentPath(): string {
+    return `${this.recommendationsFolder}/current`;
+  }
+
+  public get recommendationsArchivePath(): string {
+    return `${this.recommendationsFolder}/archive`;
+  }
+
+  public get recommendationsProcessingPath(): string {
+    return `${this.recommendationsFolder}/processing`;
   }
 }

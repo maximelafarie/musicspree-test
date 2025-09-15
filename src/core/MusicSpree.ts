@@ -6,6 +6,7 @@ import {
   NavidromeService,
   SlskdService,
 } from "../services";
+import { RecommendationsManager } from "../services/RecommendationsManager";
 import { Track, NavidromeTrack, PlaylistSyncResult } from "../types";
 import winston from "winston";
 
@@ -16,6 +17,7 @@ export class MusicSpree {
   private _navidromeService: NavidromeService;
   private _slskdService: SlskdService;
   private _beetsService: BeetsService;
+  private _recommendationsManager: RecommendationsManager;
 
   constructor() {
     this.config = Config.getInstance();
@@ -24,6 +26,16 @@ export class MusicSpree {
     this._navidromeService = new NavidromeService();
     this._slskdService = new SlskdService();
     this._beetsService = new BeetsService();
+    this._recommendationsManager = new RecommendationsManager();
+  }
+
+  async initialize(): Promise<void> {
+    this.logger.info("🚀 Initializing MusicSpree...");
+
+    // Initialiser le gestionnaire de recommendations
+    await this._recommendationsManager.initialize();
+
+    this.logger.info("✅ MusicSpree initialized successfully");
   }
 
   async validateConfig(): Promise<void> {
@@ -78,6 +90,28 @@ export class MusicSpree {
       );
     }
 
+    // Validate recommendations structure
+    try {
+      const validation =
+        await this._recommendationsManager.validateRecommendationsStructure();
+      if (!validation.valid) {
+        this.logger.warn(
+          "⚠️ Recommendations structure issues:",
+          validation.issues
+        );
+        validation.suggestions.forEach((suggestion) => {
+          this.logger.info(`💡 Suggestion: ${suggestion}`);
+        });
+      } else {
+        this.logger.debug("✅ Recommendations structure OK");
+      }
+    } catch (error) {
+      this.logger.warn(
+        "⚠️ Could not validate recommendations structure:",
+        error
+      );
+    }
+
     if (validationErrors.length > 0) {
       throw new Error(
         `Configuration validation failed:\n${validationErrors.join("\n")}`
@@ -113,13 +147,15 @@ export class MusicSpree {
         return result;
       }
 
-      // 2. Check existing tracks in Navidrome
-      this.logger.info("🔍 Checking existing tracks in Navidrome...");
+      // 2. Check existing tracks in Navidrome (including recommendations folder)
+      this.logger.info(
+        "🔍 Checking existing tracks in library and recommendations..."
+      );
       const { existingTracks, missingTracks } =
         await this.categorizeTracksByAvailability(recommendations);
       result.alreadyInLibrary = existingTracks.length;
 
-      this.logger.info(`📚 ${existingTracks.length} tracks already in library`);
+      this.logger.info(`📚 ${existingTracks.length} tracks already available`);
       this.logger.info(
         `📥 ${missingTracks.length} tracks need to be downloaded`
       );
@@ -132,7 +168,17 @@ export class MusicSpree {
         return result;
       }
 
-      // 3. Download missing tracks
+      // 3. Perform rotation before downloading new tracks
+      this.logger.info("🔄 Checking if rotation is needed...");
+      const rotationResult =
+        await this._recommendationsManager.rotateOldTracks();
+      if (rotationResult.rotated > 0 || rotationResult.deleted > 0) {
+        this.logger.info(
+          `🔄 Rotated ${rotationResult.rotated} tracks, deleted ${rotationResult.deleted} tracks`
+        );
+      }
+
+      // 4. Download missing tracks
       if (missingTracks.length > 0) {
         this.logger.info("⬇️ Starting downloads...");
         const downloadResults = await this.downloadTracks(missingTracks);
@@ -145,11 +191,11 @@ export class MusicSpree {
         );
       }
 
-      // 4. Process with Beets if there were new downloads
+      // 5. Process with Beets and move to recommendations if there were new downloads
       if (result.newDownloads > 0) {
         this.logger.info("🏷️ Processing new tracks with Beets...");
         try {
-          await this._beetsService.importNewTracks();
+          await this.processNewDownloads();
           this.logger.info("✅ Beets processing completed");
 
           // Small delay to let Navidrome discover new files
@@ -167,7 +213,7 @@ export class MusicSpree {
         }
       }
 
-      // 5. Create/update playlist
+      // 6. Create/update playlist with all available recommendations
       this.logger.info("📝 Creating/updating playlist...");
       const playlistResult = await this.updatePlaylist(recommendations);
       result.addedToPlaylist = playlistResult.addedCount;
@@ -211,6 +257,13 @@ export class MusicSpree {
         missingTracks.slice(0, 10).map((t) => `${t.artist} - ${t.title}`)
       );
 
+      // Show current recommendations stats
+      const stats = await this._recommendationsManager.getRecommendationStats();
+      this.logger.info(
+        `📊 Current recommendations: ${stats.currentCount} tracks`
+      );
+      this.logger.info(`📦 Archive: ${stats.archiveCount} tracks`);
+
       return missingTracks;
     } catch (error) {
       this.logger.error("❌ Dry run failed:", error);
@@ -225,6 +278,38 @@ export class MusicSpree {
       this.logger.info("✅ Playlist cleared");
     } catch (error) {
       this.logger.error("❌ Failed to clear playlist:", error);
+      throw error;
+    }
+  }
+
+  async clearRecommendations(): Promise<void> {
+    this.logger.info("🗑️ Clearing all recommendations...");
+    try {
+      const result =
+        await this._recommendationsManager.clearAllRecommendations();
+      this.logger.info(`✅ Cleared ${result.deleted} recommendation files`);
+    } catch (error) {
+      this.logger.error("❌ Failed to clear recommendations:", error);
+      throw error;
+    }
+  }
+
+  async getRecommendationsStats(): Promise<any> {
+    try {
+      const stats = await this._recommendationsManager.getRecommendationStats();
+      const validation =
+        await this._recommendationsManager.validateRecommendationsStructure();
+
+      return {
+        ...stats,
+        validation: {
+          valid: validation.valid,
+          issues: validation.issues,
+          suggestions: validation.suggestions,
+        },
+      };
+    } catch (error) {
+      this.logger.error("Failed to get recommendations stats:", error);
       throw error;
     }
   }
@@ -352,6 +437,28 @@ export class MusicSpree {
     return { successful, failed, errors };
   }
 
+  private async processNewDownloads(): Promise<void> {
+    try {
+      // Process downloads avec Beets vers le dossier recommendations
+      const importedFiles = await this._beetsService.importToRecommendations(
+        "/downloads"
+      );
+
+      if (importedFiles.length === 0) {
+        this.logger.warn("No files were processed by Beets");
+        return;
+      }
+
+      this.logger.info(`📁 ${importedFiles.length} files processed by Beets`);
+
+      // Note: Les fichiers sont maintenant dans le dossier processing
+      // Le RecommendationsManager les gérera lors des prochaines opérations
+    } catch (error) {
+      this.logger.error("Failed to process new downloads:", error);
+      throw error;
+    }
+  }
+
   private async updatePlaylist(
     tracks: Track[]
   ): Promise<{ addedCount: number; errors: string[] }> {
@@ -374,7 +481,7 @@ export class MusicSpree {
         }
       }
 
-      // Get all tracks that should be in the playlist
+      // Get all tracks that should be in the playlist (from all sources)
       const playlistTracks: NavidromeTrack[] = [];
 
       this.logger.info("Building playlist from available tracks...");
@@ -441,22 +548,6 @@ export class MusicSpree {
     return { addedCount, errors };
   }
 
-  private isSameTrack(track1: Track, track2: NavidromeTrack): boolean {
-    const normalize = (str: string) =>
-      str
-        .toLowerCase()
-        .replace(/[^\w\s]/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-    const artist1 = normalize(track1.artist);
-    const title1 = normalize(track1.title);
-    const artist2 = normalize(track2.artist);
-    const title2 = normalize(track2.title);
-
-    return artist1 === artist2 && title1 === title2;
-  }
-
   private chunkArray<T>(array: T[], size: number): T[][] {
     const chunks: T[][] = [];
     for (let i = 0; i < array.length; i += size) {
@@ -484,5 +575,9 @@ export class MusicSpree {
 
   public get beetsService(): BeetsService {
     return this._beetsService;
+  }
+
+  public get recommendationsManager(): RecommendationsManager {
+    return this._recommendationsManager;
   }
 }
