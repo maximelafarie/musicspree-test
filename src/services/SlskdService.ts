@@ -57,6 +57,36 @@ export class SlskdService {
       this.logger.debug(
         `Connected to slskd version: ${response.data.version || "unknown"}`
       );
+
+      // Vérifier les paramètres de recherche slskd
+      try {
+        this.logger.info("🔧 Checking slskd search configuration...");
+        const optionsResponse = await this.client.get("/api/v0/options");
+
+        if (optionsResponse.data?.searches) {
+          const searchConfig = optionsResponse.data.searches;
+          this.logger.info(`📊 Search configuration:`, {
+            responseLimit: searchConfig.responseLimit,
+            fileLimit: searchConfig.fileLimit,
+            filterResponses: searchConfig.filterResponses,
+            maximumPeerQueueLength: searchConfig.maximumPeerQueueLength,
+          });
+
+          if (searchConfig.responseLimit === 0) {
+            this.logger.warn(
+              `⚠️ WARNING: slskd responseLimit is set to 0 - this will prevent downloads!`
+            );
+            this.logger.warn(
+              `⚠️ Please update slskd configuration to set searches.responseLimit > 0`
+            );
+          }
+        }
+      } catch (configError) {
+        this.logger.debug(
+          "Could not fetch slskd search configuration:",
+          configError
+        );
+      }
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
@@ -84,9 +114,11 @@ export class SlskdService {
 
   async downloadTrack(track: Track): Promise<boolean> {
     let retries = 0;
-    let searchId: string | null = null;
+    const searchIds: string[] = []; // Garder trace de toutes les recherches créées
 
     while (retries < this.config.maxDownloadRetries) {
+      let currentSearchId: string | null = null;
+
       try {
         this.logger.info(
           `⬇️ Attempting download: ${track.artist} - ${track.title} (attempt ${
@@ -95,9 +127,12 @@ export class SlskdService {
         );
 
         // Search for the track
-        const { searchResults, searchId: currentSearchId } =
-          await this.searchTrack(track);
-        searchId = currentSearchId;
+        const { searchResults, searchId } = await this.searchTrack(track);
+        currentSearchId = searchId;
+
+        if (currentSearchId) {
+          searchIds.push(currentSearchId); // Ajouter à la liste pour cleanup final
+        }
 
         if (!searchResults || searchResults.length === 0) {
           this.logger.warn(
@@ -108,28 +143,56 @@ export class SlskdService {
         }
 
         // Find the best match and download
+        this.logger.info(
+          `🔍 Processing ${searchResults.length} search results for matching...`
+        );
         const bestMatch = this.selectBestMatch(searchResults, track);
 
         if (!bestMatch) {
           this.logger.warn(
-            `No suitable match found for: ${track.artist} - ${track.title}`
+            `❌ No suitable match found for: ${track.artist} - ${track.title}`
           );
+          this.logger.warn(`Available results were:`);
+          searchResults.slice(0, 5).forEach((file, index) => {
+            this.logger.warn(
+              `  ${index + 1}. ${file.filename} (user: ${file.username})`
+            );
+          });
           retries++;
           continue;
         }
 
+        this.logger.info(
+          `✅ Selected best match: ${bestMatch.filename} from user ${bestMatch.username}`
+        );
+        this.logger.info(`📥 Initiating download...`);
+
         const downloadSuccess = await this.initiateDownload(bestMatch);
 
         if (downloadSuccess) {
-          // Wait for download to complete
+          this.logger.info(
+            "✅ Download initiated successfully, waiting for completion..."
+          );
+
+          // ✅ CORRECTION : Ne PAS supprimer la recherche avant la fin du téléchargement
+          // Attendre que le téléchargement se termine AVANT de nettoyer
           const completed = await this.waitForDownloadCompletion(bestMatch);
 
           if (completed) {
             this.logger.info(
-              `✅ Successfully downloaded: ${track.artist} - ${track.title}`
+              `🎉 Successfully downloaded: ${track.artist} - ${track.title}`
             );
+
+            // Nettoyer SEULEMENT après le succès du téléchargement
+            await this.cleanupAllSearches(searchIds);
             return true;
+          } else {
+            this.logger.warn("❌ Download did not complete successfully");
           }
+        } else {
+          this.logger.error(
+            "❌ Failed to initiate download - no download request was sent"
+          );
         }
 
         retries++;
@@ -141,12 +204,6 @@ export class SlskdService {
           error
         );
         retries++;
-      } finally {
-        // Clean up search regardless of success/failure
-        if (searchId) {
-          await this.cleanupSearch(searchId);
-          searchId = null;
-        }
       }
 
       if (retries < this.config.maxDownloadRetries) {
@@ -154,10 +211,19 @@ export class SlskdService {
       }
     }
 
+    // Nettoyer toutes les recherches créées en cas d'échec final
+    await this.cleanupAllSearches(searchIds);
+
     this.logger.error(
       `❌ Failed to download after ${this.config.maxDownloadRetries} attempts: ${track.artist} - ${track.title}`
     );
     return false;
+  }
+
+  private async cleanupAllSearches(searchIds: string[]): Promise<void> {
+    for (const searchId of searchIds) {
+      await this.cleanupSearch(searchId);
+    }
   }
 
   private async searchTrack(
@@ -165,18 +231,25 @@ export class SlskdService {
   ): Promise<{ searchResults: any[]; searchId: string | null }> {
     try {
       const searchQuery = `${track.artist} ${track.title}`;
-      this.logger.debug(`Searching for: "${searchQuery}"`);
+      this.logger.info(`🔍 Searching for: "${searchQuery}"`);
 
-      // Initiate search
+      // Initiate search with longer timeout for slskd network discovery
+      this.logger.info(`📡 Sending search request to slskd...`);
       const searchResponse = await this.client.post("/api/v0/searches", {
         searchText: searchQuery,
-        timeout: 15000,
+        timeout: 45000, // Augmenté à 45 secondes pour laisser le temps au réseau P2P
       });
 
-      this.logger.debug(
-        `Search response:`,
-        JSON.stringify(searchResponse.data, null, 2)
-      );
+      this.logger.info(`📡 Search initiation response:`);
+      this.logger.info(`  Status: ${searchResponse.status}`);
+      this.logger.info(`  Status Text: ${searchResponse.statusText}`);
+      this.logger.info(`  Response type: ${typeof searchResponse.data}`);
+      this.logger.info(`  Response data:`, searchResponse.data);
+
+      // Vérifier si on a les données de base
+      if (!searchResponse.data) {
+        throw new Error("No data in search initiation response");
+      }
 
       // Handle different response formats
       let searchId: string | null = null;
@@ -197,49 +270,106 @@ export class SlskdService {
 
       this.logger.debug(`Search initiated with ID: ${searchId}`);
 
-      // Wait for search results with progressive checks
+      // Wait for search results with progressive checks - longer timeout for P2P network
       let attempts = 0;
-      const maxAttempts = 6; // 3 seconds * 6 = 18 seconds max wait
+      const maxAttempts = 12; // 5 seconds * 12 = 60 seconds max wait (pour le réseau P2P)
 
       while (attempts < maxAttempts) {
-        await this.sleep(3000);
+        await this.sleep(5000); // Attendre 5 secondes entre chaque vérification
         attempts++;
 
+        this.logger.debug(
+          `Checking search results (attempt ${attempts}/${maxAttempts})...`
+        );
+
         try {
-          const resultsResponse = await this.client.get(
+          // Vérifier d'abord le statut de la recherche
+          const statusResponse = await this.client.get(
             `/api/v0/searches/${searchId}`
           );
 
-          this.logger.debug(
-            `Search results response (attempt ${attempts}):`,
-            JSON.stringify(resultsResponse.data, null, 2)
+          this.logger.info(
+            `🔍 Search status check (attempt ${attempts}/${maxAttempts}):`
+          );
+          this.logger.info(`  Status: ${statusResponse.status}`);
+          this.logger.info(
+            `  Search state: ${statusResponse.data?.state || "unknown"}`
+          );
+          this.logger.info(
+            `  Is complete: ${statusResponse.data?.isComplete || false}`
+          );
+          this.logger.info(
+            `  Response count: ${statusResponse.data?.responseCount || 0}`
           );
 
-          // Check if search is complete
-          if (resultsResponse.data?.state === "InProgress") {
-            this.logger.debug(
-              `Search still in progress (attempt ${attempts}/${maxAttempts})`
+          // Check if search is still in progress
+          if (statusResponse.data?.state === "InProgress") {
+            this.logger.info(
+              `⏳ Search still in progress (attempt ${attempts}/${maxAttempts})`
             );
             continue;
           }
 
-          if (!resultsResponse.data?.responses) {
+          if (!statusResponse.data?.isComplete) {
             if (attempts < maxAttempts) {
-              this.logger.debug(
-                `No responses yet (attempt ${attempts}/${maxAttempts})`
+              this.logger.info(
+                `⏳ Search not complete yet (attempt ${attempts}/${maxAttempts}), continuing...`
               );
               continue;
             }
-            this.logger.debug(
-              "No responses in search results after all attempts"
+            this.logger.warn(`❌ Search did not complete after all attempts`);
+            return { searchResults: [], searchId };
+          }
+
+          // Maintenant récupérer les vraies réponses avec l'endpoint correct
+          this.logger.info(`📡 Fetching actual search responses...`);
+          const responsesResponse = await this.client.get(
+            `/api/v0/searches/${searchId}/responses`
+          );
+
+          this.logger.info(`📊 Responses endpoint result:`);
+          this.logger.info(`  Status: ${responsesResponse.status}`);
+          this.logger.info(
+            `  Response count: ${
+              Array.isArray(responsesResponse.data)
+                ? responsesResponse.data.length
+                : 0
+            }`
+          );
+
+          if (
+            !responsesResponse.data ||
+            !Array.isArray(responsesResponse.data)
+          ) {
+            this.logger.warn(
+              `❌ No valid responses data from /responses endpoint`
             );
             return { searchResults: [], searchId };
           }
 
-          // Process results
+          // Process results from the /responses endpoint
           const allFiles: any[] = [];
 
-          for (const response of resultsResponse.data.responses) {
+          this.logger.info(
+            `🔄 Processing ${responsesResponse.data.length} user responses...`
+          );
+
+          for (const response of responsesResponse.data) {
+            this.logger.info(
+              `👤 Processing response from user: ${
+                response.username || "unknown"
+              }`
+            );
+            this.logger.info(
+              `  Files in response: ${
+                response.files ? response.files.length : 0
+              }`
+            );
+            this.logger.info(
+              `  Has free upload slot: ${response.hasFreeUploadSlot}`
+            );
+            this.logger.info(`  Queue length: ${response.queueLength || 0}`);
+
             if (response.files && Array.isArray(response.files)) {
               for (const file of response.files) {
                 allFiles.push({
@@ -247,24 +377,58 @@ export class SlskdService {
                   username: response.username,
                   response: response,
                 });
+                this.logger.debug(
+                  `  📁 Added file: ${file.filename || "unknown"} (${Math.round(
+                    (file.size || 0) / (1024 * 1024)
+                  )}MB, ${file.bitRate || "unknown"} kbps)`
+                );
               }
+            } else {
+              this.logger.warn(
+                `  ❌ No files array in response from ${response.username}`
+              );
             }
           }
 
-          this.logger.debug(`Found ${allFiles.length} files in search results`);
+          this.logger.info(
+            `✅ Found ${allFiles.length} total files in search results`
+          );
           return { searchResults: allFiles, searchId };
         } catch (resultsError) {
-          this.logger.debug(
-            `Error getting search results (attempt ${attempts}):`,
+          this.logger.error(
+            `❌ Error getting search results (attempt ${attempts}/${maxAttempts}):`,
             resultsError
           );
+          this.logger.error(`Error details:`, {
+            message:
+              resultsError instanceof Error
+                ? resultsError.message
+                : "Unknown error",
+            status: axios.isAxiosError(resultsError)
+              ? resultsError.response?.status
+              : "N/A",
+            data: axios.isAxiosError(resultsError)
+              ? resultsError.response?.data
+              : "N/A",
+          });
+
           if (attempts >= maxAttempts) {
+            this.logger.error(
+              `❌ Max attempts reached, giving up on search results`
+            );
             throw resultsError;
           }
         }
       }
 
-      this.logger.warn(`Search timeout after ${maxAttempts} attempts`);
+      this.logger.warn(
+        `⏰ Search timeout after ${
+          maxAttempts * 5
+        } seconds (${maxAttempts} attempts)`
+      );
+      this.logger.warn(
+        `❌ Search ID ${searchId} did not return results in time`
+      );
       return { searchResults: [], searchId };
     } catch (error) {
       this.logger.error(
@@ -293,7 +457,14 @@ export class SlskdService {
   }
 
   private selectBestMatch(searchResults: any[], track: Track): any | null {
-    if (searchResults.length === 0) return null;
+    if (searchResults.length === 0) {
+      this.logger.warn("❌ No search results to process");
+      return null;
+    }
+
+    this.logger.info(
+      `🎯 Analyzing ${searchResults.length} search results for best match...`
+    );
 
     // Score each result
     const scoredResults = searchResults.map((file) => ({
@@ -305,12 +476,14 @@ export class SlskdService {
     scoredResults.sort((a, b) => b.score - a.score);
 
     // Log top results for debugging
-    this.logger.debug("Top 5 search results:");
+    this.logger.info("📊 Top 5 search results:");
     scoredResults.slice(0, 5).forEach((result, index) => {
-      this.logger.debug(
-        `${index + 1}. ${result.file.filename} (score: ${result.score.toFixed(
+      this.logger.info(
+        `  ${index + 1}. ${result.file.filename} (score: ${result.score.toFixed(
           2
-        )}, bitrate: ${result.file.bitRate || "unknown"})`
+        )}, bitrate: ${result.file.bitRate || "unknown"}, user: ${
+          result.file.username
+        })`
       );
     });
 
@@ -321,8 +494,14 @@ export class SlskdService {
         this.isAcceptableQuality(result.file)
     );
 
+    this.logger.info(
+      `✅ ${qualityFiltered.length} files passed quality filter (score > 0.5)`
+    );
+
     if (qualityFiltered.length > 0) {
-      this.logger.debug(`Selected: ${qualityFiltered[0].file.filename}`);
+      this.logger.info(
+        `🎯 Selected: ${qualityFiltered[0].file.filename} from ${qualityFiltered[0].file.username}`
+      );
       return qualityFiltered[0].file;
     }
 
@@ -331,14 +510,31 @@ export class SlskdService {
       (result) => result.score > 0.3 && this.isAcceptableQuality(result.file)
     );
 
+    this.logger.info(
+      `⚠️ Using fallback filter (score > 0.3): ${fallbackFiltered.length} files`
+    );
+
     if (fallbackFiltered.length > 0) {
-      this.logger.debug(
-        `Using fallback match: ${fallbackFiltered[0].file.filename}`
+      this.logger.info(
+        `🎯 Using fallback match: ${fallbackFiltered[0].file.filename} from ${fallbackFiltered[0].file.username}`
       );
       return fallbackFiltered[0].file;
     }
 
-    this.logger.debug("No files passed quality filter");
+    this.logger.warn("❌ No files passed quality filter - all files rejected");
+    // Log why files were rejected
+    scoredResults.slice(0, 3).forEach((result, index) => {
+      const qualityReason = this.isAcceptableQuality(result.file)
+        ? "QUALITY OK"
+        : "QUALITY REJECTED";
+      const scoreReason = result.score > 0.3 ? "SCORE OK" : "SCORE TOO LOW";
+      this.logger.warn(
+        `  ${index + 1}. ${
+          result.file.filename
+        }: ${qualityReason}, ${scoreReason} (${result.score.toFixed(2)})`
+      );
+    });
+
     return null;
   }
 
@@ -408,58 +604,92 @@ export class SlskdService {
   }
 
   private isAcceptableQuality(file: any): boolean {
+    const reasons: string[] = [];
+
     // Check file extension
     if (!file.filename?.match(/\.(mp3|flac|wav|m4a|ogg|aac)$/i)) {
-      this.logger.debug(`Rejected file (bad extension): ${file.filename}`);
+      reasons.push(`bad extension: ${file.filename?.split(".").pop()}`);
+      this.logger.debug(`❌ Rejected file (bad extension): ${file.filename}`);
       return false;
+    } else {
+      reasons.push("extension OK");
     }
 
     // Check bitrate (if available)
     if (file.bitRate && file.bitRate < 128) {
+      reasons.push(`bitrate too low: ${file.bitRate}`);
       this.logger.debug(
-        `Rejected file (low bitrate ${file.bitRate}): ${file.filename}`
+        `❌ Rejected file (low bitrate ${file.bitRate}): ${file.filename}`
       );
       return false;
+    } else if (file.bitRate) {
+      reasons.push(`bitrate OK: ${file.bitRate}`);
+    } else {
+      reasons.push("bitrate unknown");
     }
 
     // Check file size (avoid extremely small files)
     if (file.size && file.size < 1024 * 1024) {
       // Less than 1MB
+      reasons.push(`size too small: ${Math.round(file.size / 1024)}KB`);
       this.logger.debug(
-        `Rejected file (too small ${file.size} bytes): ${file.filename}`
+        `❌ Rejected file (too small ${file.size} bytes): ${file.filename}`
       );
       return false;
+    } else if (file.size) {
+      reasons.push(`size OK: ${Math.round(file.size / (1024 * 1024))}MB`);
+    } else {
+      reasons.push("size unknown");
     }
 
+    this.logger.debug(
+      `✅ File quality acceptable: ${file.filename} (${reasons.join(", ")})`
+    );
     return true;
   }
 
   private async initiateDownload(file: any): Promise<boolean> {
     try {
-      const downloadRequest = {
-        username: file.username,
-        files: [
-          {
-            filename: file.filename,
-            size: file.size || 0,
-          },
-        ],
-      };
+      // Vérifier que nous avons les informations nécessaires
+      if (!file.username) {
+        this.logger.error("❌ Cannot initiate download: missing username");
+        return false;
+      }
 
-      this.logger.debug(`Initiating download for user ${file.username}:`);
-      this.logger.debug(`- File: ${file.filename}`);
-      this.logger.debug(`- Size: ${file.size || "unknown"} bytes`);
+      if (!file.filename) {
+        this.logger.error("❌ Cannot initiate download: missing filename");
+        return false;
+      }
+
+      // Format correct pour l'API slskd : array de fichiers directement
+      const downloadRequest = [
+        {
+          filename: file.filename,
+          size: file.size || 0,
+        },
+      ];
+
+      this.logger.info(`🚀 Initiating download from user: ${file.username}`);
+      this.logger.info(`  📁 File: ${file.filename}`);
+      this.logger.info(
+        `  📏 Size: ${
+          file.size ? Math.round(file.size / (1024 * 1024)) + "MB" : "unknown"
+        }`
+      );
       this.logger.debug(
-        `- Full request:`,
+        `📋 Request payload:`,
         JSON.stringify(downloadRequest, null, 2)
       );
 
-      const response = await this.client.post(
-        "/api/v0/transfers/downloads",
-        downloadRequest
-      );
+      // URL correcte avec username dans le path
+      const downloadUrl = `/api/v0/transfers/downloads/${encodeURIComponent(
+        file.username
+      )}`;
+      this.logger.info(`📡 Request URL: ${downloadUrl}`);
 
-      this.logger.debug(`Download initiation response:`, {
+      const response = await this.client.post(downloadUrl, downloadRequest);
+
+      this.logger.info(`📡 Download API Response:`, {
         status: response.status,
         statusText: response.statusText,
         data: response.data,
@@ -471,25 +701,60 @@ export class SlskdService {
         response.status === 204;
 
       if (success) {
-        this.logger.info(`✅ Download request sent successfully`);
-        // Give slskd a moment to process the request
-        await this.sleep(1000);
-      } else {
-        this.logger.warn(
-          `Download initiation returned unexpected status: ${response.status}`
+        this.logger.info(
+          `✅ Download request accepted by slskd (HTTP ${response.status})`
         );
+        this.logger.info(
+          `⏱️ Waiting 3 seconds for slskd to process the request...`
+        );
+        // Donner plus de temps à slskd pour traiter la demande
+        await this.sleep(3000);
+
+        // Vérifier immédiatement si le téléchargement apparaît dans la queue
+        const downloads = await this.getActiveDownloads();
+        this.logger.info(
+          `🔍 Active downloads after request: ${downloads.length}`
+        );
+        downloads.forEach((download, index) => {
+          this.logger.info(
+            `  ${index + 1}. ${download.username} - ${download.state} - ${
+              download.files?.length || 0
+            } files`
+          );
+        });
+      } else {
+        this.logger.error(
+          `❌ Download request rejected by slskd: HTTP ${response.status} - ${response.statusText}`
+        );
+        this.logger.error(`Response body:`, response.data);
       }
 
       return success;
     } catch (error) {
       if (axios.isAxiosError(error)) {
-        this.logger.error("Failed to initiate download (Axios Error):");
-        this.logger.error(`- Status: ${error.response?.status}`);
+        this.logger.error("❌ Failed to initiate download (Axios Error):");
+        this.logger.error(`  🌐 URL: ${error.config?.url}`);
+        this.logger.error(`  📊 Status: ${error.response?.status}`);
         this.logger.error(
-          `- Response: ${JSON.stringify(error.response?.data)}`
+          `  📄 Response: ${JSON.stringify(error.response?.data)}`
         );
+        this.logger.error(
+          `  🔧 Request payload: ${JSON.stringify(error.config?.data)}`
+        );
+
+        // Log plus de détails sur l'erreur
+        if (error.response?.status === 400) {
+          this.logger.error("❌ Bad Request - check request format");
+        } else if (error.response?.status === 404) {
+          this.logger.error("❌ User not found or endpoint incorrect");
+        } else if (error.response?.status === 401) {
+          this.logger.error("❌ Unauthorized - check API key");
+        }
       } else {
-        this.logger.error("Failed to initiate download:", error);
+        this.logger.error(
+          "❌ Failed to initiate download (Unknown Error):",
+          error
+        );
       }
       return false;
     }
@@ -511,6 +776,7 @@ export class SlskdService {
     );
 
     let lastDownloadCount = -1;
+    let downloadFound = false;
 
     while (Date.now() - startTime < maxWait) {
       try {
@@ -556,6 +822,7 @@ export class SlskdService {
             if (
               download.files?.some((f: any) => f.filename === file.filename)
             ) {
+              downloadFound = true;
               const matchingFile = download.files.find(
                 (f: any) => f.filename === file.filename
               );
@@ -601,6 +868,14 @@ export class SlskdService {
               }
             }
           }
+        }
+
+        // Si aucun téléchargement n'a été trouvé après 30 secondes, c'est probablement un échec
+        if (!downloadFound && Date.now() - startTime > 30000) {
+          this.logger.warn(
+            "No matching download found after 30 seconds - download may have failed to start"
+          );
+          return false;
         }
       } catch (error) {
         this.logger.debug("Error checking download status:", error);
